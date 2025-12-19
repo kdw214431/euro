@@ -2,13 +2,48 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
+from github import Github
+from io import StringIO
 import time
-import os
 
 # --- 페이지 설정 ---
-st.set_page_config(page_title="여행 가계부 & 계산기", page_icon="✈️")
+st.set_page_config(page_title="GitHub 연동 가계부", page_icon="🐙")
 
-# --- 환율 정보 가져오는 함수 ---
+# --- GitHub 연결 함수 ---
+def get_github_repo():
+    """Secrets에 저장된 정보로 GitHub 저장소를 가져옵니다."""
+    token = st.secrets["github"]["token"]
+    g = Github(token)
+    repo_path = f"{st.secrets['github']['username']}/{st.secrets['github']['repo_name']}"
+    return g.get_repo(repo_path)
+
+def load_data_from_github():
+    """GitHub에 있는 expenses.csv 파일을 읽어옵니다."""
+    try:
+        repo = get_github_repo()
+        # 파일 내용을 가져옴
+        contents = repo.get_contents("expenses.csv", ref=st.secrets["github"]["branch"])
+        csv_data = contents.decoded_content.decode("utf-8")
+        return pd.read_csv(StringIO(csv_data))
+    except:
+        # 파일이 없으면 빈 데이터프레임 반환
+        return pd.DataFrame(columns=["날짜", "항목", "통화", "외화금액", "환율", "한국돈(원)"])
+
+def save_data_to_github(new_df):
+    """데이터프레임을 GitHub expenses.csv 파일에 덮어씁니다."""
+    repo = get_github_repo()
+    csv_content = new_df.to_csv(index=False)
+    branch = st.secrets["github"]["branch"]
+    
+    try:
+        # 파일이 이미 있으면 업데이트(Update)
+        contents = repo.get_contents("expenses.csv", ref=branch)
+        repo.update_file(contents.path, "가계부 업데이트 (앱)", csv_content, contents.sha, branch=branch)
+    except:
+        # 파일이 없으면 새로 생성(Create)
+        repo.create_file("expenses.csv", "가계부 파일 생성", csv_content, branch=branch)
+
+# --- 환율 정보 함수 ---
 def get_exchange_rate(target_code):
     try:
         url = "https://finance.naver.com/marketindex/"
@@ -20,139 +55,79 @@ def get_exchange_rate(target_code):
     except:
         return 0.0
 
-# --- 데이터 파일 관리 (CSV) ---
-CSV_FILE = "my_expenses.csv"
+# --- 메인 화면 ---
+st.title("🐙 GitHub 연동 가계부")
+st.caption("카드 등록 없이! 데이터가 GitHub 저장소에 안전하게 저장됩니다.")
 
-def load_data():
-    if os.path.exists(CSV_FILE):
-        return pd.read_csv(CSV_FILE)
-    else:
-        # 파일이 없으면 빈 표를 만듭니다.
-        return pd.DataFrame(columns=["날짜", "항목", "통화", "외화금액", "환율", "한국돈(원)"])
-
-def save_data(df):
-    df.to_csv(CSV_FILE, index=False)
-
-# --- 메인 화면 시작 ---
-st.title("✈️ 똑똑한 여행 가계부")
-
-# 탭 만들기 (화면 분리)
 tab1, tab2 = st.tabs(["💱 환율 계산기", "📝 지출 기록장"])
 
-# ==========================================
-# 탭 1: 기존 환율 계산기 기능
-# ==========================================
+# 탭 1: 계산기 (기존 동일)
 with tab1:
     st.header("실시간 환율 계산")
+    currency = st.radio("통화 선택", ["🇺🇸 USD", "🇪🇺 EUR", "🇯🇵 JPY"], horizontal=True)
+    if "USD" in currency: code, symbol, j = "usd", "$", False
+    elif "EUR" in currency: code, symbol, j = "eur", "€", False
+    else: code, symbol, j = "jpy", "¥", True
     
-    currency = st.radio(
-        "통화를 선택해주세요",
-        ["🇺🇸 미국 달러 (USD)", "🇪🇺 유럽 연합 (EUR)", "🇯🇵 일본 엔 (JPY)"],
-        horizontal=True,
-        key="calc_radio"
-    )
+    val = st.number_input(f"금액 ({symbol})", min_value=0.0, value=None)
+    if st.button("계산"):
+        if val:
+            r = get_exchange_rate(code)
+            k = val * (r/100) if j else val * r
+            st.success(f"약 {int(k):,} 원")
 
-    # 설정 변수
-    if "미국" in currency:
-        code, symbol, is_jpy = "usd", "$", False
-    elif "유럽" in currency:
-        code, symbol, is_jpy = "eur", "€", False
-    else:
-        code, symbol, is_jpy = "jpy", "¥", True
-
-    money_input = st.number_input(f"금액 입력 ({symbol})", min_value=0.0, value=None, step=1.0, key="calc_input")
-
-    if st.button("계산하기", key="calc_btn"):
-        if money_input:
-            rate = get_exchange_rate(code)
-            if is_jpy:
-                krw = money_input * (rate / 100)
-                rate_info = f"100엔 = {rate}원"
-            else:
-                krw = money_input * rate
-                rate_info = f"1{symbol} = {rate}원"
-            
-            st.success(f"적용 환율: {rate_info}")
-            st.markdown(f"### 🇰🇷 약 {int(krw):,} 원")
-
-# ==========================================
-# 탭 2: 가계부 (새로 추가된 기능!)
-# ==========================================
+# 탭 2: 가계부 (GitHub 연동)
 with tab2:
-    st.header("무엇을 썼나요?")
+    st.header("지출 내역 추가")
     
-    # 1. 입력 폼 만들기
     col1, col2 = st.columns([2, 1])
-    with col1:
-        item_name = st.text_input("지출 내역 (예: 점심, 기념품)")
-    with col2:
-        date = st.date_input("날짜")
-
-    # 통화 및 금액 입력
+    with col1: item = st.text_input("내역 (예: 편의점)")
+    with col2: date = st.date_input("날짜")
+    
     col3, col4 = st.columns(2)
-    with col3:
-        exp_currency = st.selectbox("통화 선택", ["USD ($)", "EUR (€)", "JPY (¥)"])
-    with col4:
-        exp_amount = st.number_input("금액", min_value=0.0, step=1.0)
-
-    # 추가 버튼
-    if st.button("기록 추가하기", type="primary"):
-        if not item_name or exp_amount == 0:
-            st.warning("내역과 금액을 입력해주세요!")
+    with col3: c_type = st.selectbox("통화", ["USD", "EUR", "JPY"])
+    with col4: amt = st.number_input("금액", min_value=0.0)
+    
+    if st.button("GitHub에 저장하기", type="primary"):
+        if not item or amt == 0:
+            st.warning("내용을 입력해주세요.")
         else:
-            with st.spinner("환율 계산 후 저장 중..."):
-                # 통화 코드 매핑
-                if "USD" in exp_currency:
-                    c_code, is_j = "usd", False
-                elif "EUR" in exp_currency:
-                    c_code, is_j = "eur", False
-                else:
-                    c_code, is_j = "jpy", True
+            with st.spinner("GitHub에 커밋하는 중... (3~5초 소요)"):
+                # 1. 환율 계산
+                if "USD" in c_type: c, j = "usd", False
+                elif "EUR" in c_type: c, j = "eur", False
+                else: c, j = "jpy", True
                 
-                # 환율 가져오기 및 계산
-                current_rate = get_exchange_rate(c_code)
-                if is_j:
-                    final_krw = int(exp_amount * (current_rate / 100))
-                else:
-                    final_krw = int(exp_amount * current_rate)
-
-                # 데이터 저장하기
-                df = load_data()
-                new_data = {
-                    "날짜": date,
-                    "항목": item_name,
-                    "통화": exp_currency,
-                    "외화금액": exp_amount,
-                    "환율": current_rate,
-                    "한국돈(원)": final_krw
-                }
-                # pandas concat을 이용해 행 추가 (최신 pandas 버전 대응)
-                new_df = pd.DataFrame([new_data])
-                df = pd.concat([df, new_df], ignore_index=True)
-                save_data(df)
+                rate = get_exchange_rate(c)
+                krw = int(amt * (rate/100)) if j else int(amt * rate)
                 
-                st.success(f"저장 완료! ({final_krw:,}원)")
+                # 2. 기존 데이터 가져오기
+                df = load_data_from_github()
+                
+                # 3. 새 데이터 추가
+                new_row = pd.DataFrame([{
+                    "날짜": str(date), "항목": item, "통화": c_type,
+                    "외화금액": amt, "환율": rate, "한국돈(원)": krw
+                }])
+                df = pd.concat([df, new_row], ignore_index=True)
+                
+                # 4. GitHub에 저장 (커밋)
+                save_data_to_github(df)
+                
+                st.success(f"저장 성공! GitHub 저장소를 확인해보세요.")
                 time.sleep(1)
-                st.rerun() # 화면 새로고침해서 표 업데이트
-
-    st.markdown("---")
-    
-    # 2. 저장된 내역 보여주기
-    st.subheader("📋 나의 지출 리스트")
-    df = load_data()
-    
-    if not df.empty:
-        # 보기 좋게 표 출력
-        st.dataframe(df, use_container_width=True)
-        
-        # 총 합계 계산
-        total_spent = df["한국돈(원)"].sum()
-        st.metric(label="총 지출 금액 (KRW 환산)", value=f"{total_spent:,} 원")
-        
-        # 리셋 버튼 (데이터 삭제)
-        if st.button("내역 초기화"):
-            if os.path.exists(CSV_FILE):
-                os.remove(CSV_FILE)
                 st.rerun()
+    
+    st.divider()
+    
+    st.subheader("📋 저장된 목록 (GitHub)")
+    if st.button("새로고침"):
+        st.rerun()
+        
+    df_view = load_data_from_github()
+    if not df_view.empty:
+        st.dataframe(df_view, use_container_width=True)
+        if "한국돈(원)" in df_view.columns:
+            st.metric("총 지출", f"{df_view['한국돈(원)'].sum():,} 원")
     else:
-        st.info("아직 기록된 지출이 없습니다.")
+        st.info("아직 저장된 데이터가 없습니다.")
