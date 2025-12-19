@@ -59,7 +59,7 @@ def get_exchange_rate(target_code):
 
 # --- 메인 화면 ---
 st.title("✈️ 우리들의 여행 가계부")
-st.caption("한국 원화(KRW)도 기록할 수 있어요!")
+st.caption("실시간 환율 계산기 & 공동 지출 기록")
 
 tab1, tab2 = st.tabs(["💱 환율 계산기", "📝 공동 지출 기록"])
 
